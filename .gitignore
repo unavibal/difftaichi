@@ -1,3 +1,10 @@
 .DS_Store
 .idea
 __pycache__
+
+.env/
+.vscode/
+.conda/
+
+*.bin
+diffmpm/

@@ -21,8 +21,8 @@ E = 10
 # TODO: update
 mu = E
 la = E
-max_steps = 2048
-steps = 1024
+max_steps = 4048
+steps = 4024
 gravity = 3.8
 target = [0.8, 0.2]
 
@@ -342,7 +342,7 @@ def visualize(s, folder):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--iters', type=int, default=100)
+    parser.add_argument('--iters', type=int, default=200)
     options = parser.parse_args()
 
     # initialization

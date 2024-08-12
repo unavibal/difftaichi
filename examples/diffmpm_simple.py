@@ -2,7 +2,7 @@ import taichi as ti
 import matplotlib.pyplot as plt
 
 real = ti.f32
-ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=1.5)
+ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16)
 
 dim = 2
 N = 60  # reduce to 30 if run out of GPU memory
@@ -11,11 +11,13 @@ n_grid = 120
 dx = 1 / n_grid
 inv_dx = 1 / dx
 dt = 3e-4
-p_mass = 1
+p_mass = 2
 p_vol = 1
 E = 100
+E, nu = 0.1e4, 0.2
 mu = E
 la = E
+mu, la = E / (2 * (1 + nu)), E * nu / ((1 + nu) * (1 - 2 * nu)) 
 max_steps = 1024
 steps = 1024
 gravity = 9.8
@@ -166,38 +168,49 @@ img_count = 0
 
 gui = ti.GUI("Simple Differentiable MPM Solver", (640, 640), 0xAAAAAA)
 
-for i in range(30):
-    grid_v_in.fill(0)
-    grid_m_in.fill(0)
+n_frame = 15
+scale = 4
+for s in range(steps - 1):
+             substep(s) 
+             if s % n_frame==0:
+                x_np =x.to_numpy()
+                gui.circles(x_np[s], color=0x112233, radius=1.5)
+                gui.circle(target, radius=5, color=0xFFFFFF)
+                img_count += 1
+                gui.show()
 
-    x_avg[None] = [0, 0]
-    with ti.ad.Tape(loss=loss):
-        set_v()
-        for s in range(steps - 1):
-            substep(s)
+# for i in range(30):
+#     grid_v_in.fill(0)
+#     grid_m_in.fill(0)
 
-        compute_x_avg()
-        compute_loss()
+#     x_avg[None] = [0, 0]
+#     with ti.ad.Tape(loss=loss):
+#         set_v()
+#         for s in range(steps - 1):
+#             substep(s)
 
-    l = loss[None]
-    losses.append(l)
-    grad = init_v.grad[None]
-    print('loss=', l, '   grad=', (grad[0], grad[1]))
-    learning_rate = 10
-    init_v[None][0] -= learning_rate * grad[0]
-    init_v[None][1] -= learning_rate * grad[1]
+#         compute_x_avg()
+#         compute_loss()
 
-    # visualize
-    x_np = x.to_numpy()
-    for s in range(15, steps, 16):
-        scale = 4
-        gui.circles(x_np[s], color=0x112233, radius=1.5)
-        gui.circle(target, radius=5, color=0xFFFFFF)
-        img_count += 1
-        gui.show()
+#     l = loss[None]
+#     losses.append(l)
+#     grad = init_v.grad[None]
+#     print('loss=', l, '   grad=', (grad[0], grad[1]))
+#     learning_rate = 20
+#     init_v[None][0] -= learning_rate * grad[0]
+#     init_v[None][1] -= learning_rate * grad[1]
 
-plt.title("Optimization of Initial Velocity")
-plt.ylabel("Loss")
-plt.xlabel("Gradient Descent Iterations")
-plt.plot(losses)
-plt.show()
+#     # visualize
+#     x_np = x.to_numpy()
+#     for s in range(15, steps, 16):
+#         scale = 4
+#         gui.circles(x_np[s], color=0x112233, radius=1.5)
+#         gui.circle(target, radius=5, color=0xFFFFFF)
+#         img_count += 1
+#         gui.show()
+
+# plt.title("Optimization of Initial Velocity")
+# plt.ylabel("Loss")
+# plt.xlabel("Gradient Descent Iterations")
+# plt.plot(losses)
+# plt.show()
