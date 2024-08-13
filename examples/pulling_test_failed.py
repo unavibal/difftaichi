@@ -20,11 +20,19 @@ height = 0.025
 N = 480  # reduce to 30 if run out of GPU memory
 Nh = 10
 n_particles = N * Nh
-n_grid = 120
+x_n_grid = 180
+y_n_grid = 120
 inner_grid_res = 10
 
-dx = 1 / n_grid
-inv_dx = 1 / dx
+dx_x = 1 / x_n_grid
+dx_y = 1 / y_n_grid
+
+dx = ti.Vector([dx_x, dx_y])
+
+inv_dx_x = 1/dx_x
+inv_dx_y = 1/dx_y
+inv_dx = ti.Vector([1/dx_x, 1/dx_y])
+inv_dx_mat = ti.Matrix([[1/dx_x, 0],[0, 1/dx_y]])
 dt = 0.5e-4
 p_mass = 10
 p_vol = 1
@@ -83,17 +91,21 @@ new_v = ti.Vector.field(dim,
 
 grid_v_in = ti.Vector.field(dim,
                             dtype=real,
-                            shape=(n_grid, n_grid),
+                            shape=(x_n_grid, y_n_grid),
                             needs_grad=grad_needed)
 
 
 grid_v_out = ti.Vector.field(dim,
                              dtype=real,
-                             shape=(n_grid, n_grid),
+                             shape=(x_n_grid, y_n_grid),
                              needs_grad=grad_needed)
 
+grid_v_zeroing = ti.field(dtype=ti.u1,
+                          shape=(x_n_grid, y_n_grid))
+grid_v_zeroing.fill(1)
+
 grid_m_in = ti.field(dtype=real,
-                     shape=(n_grid, n_grid),
+                     shape=(x_n_grid, y_n_grid),
                      needs_grad=grad_needed)
 
 
@@ -143,7 +155,7 @@ def p2g(f: ti.i32):
         r, s = ti.polar_decompose(new_F[p])
         cauchy = 2 * mu[None] * (new_F[p] - r) @ new_F[p].transpose() + \
                  ti.Matrix.diag(2, la[None] * (J - 1) * J)
-        stress = -(dt * p_vol * 4 * inv_dx * inv_dx) * cauchy
+        stress = -(dt * p_vol * 4 * inv_dx_x * inv_dx_y) * cauchy
         affine = stress + p_mass * C[p]
 
         for i in ti.static(range(3)):
@@ -154,6 +166,8 @@ def p2g(f: ti.i32):
                 grid_v_in[base + offset] += weight * (p_mass * v[p] +
                                                          affine @ dpos)
                 grid_m_in[base + offset] += weight * p_mass
+                if p < Nh:
+                    grid_v_zeroing[base + offset] = 0
 
 
 bound = 3
@@ -163,23 +177,26 @@ quad_damping_coef[None] = 5.32
 
 @ti.kernel
 def grid_op(f: ti.i32):
-    for i, j in ti.ndrange(n_grid, n_grid):
-        inv_m = 1 / (grid_m_in[i, j] + 1e-10)
-        v_out = inv_m * grid_v_in[i, j]
-        v_out[1] -= dt * gravity
-        damping = ti.pow(v_out,2)*quad_damping_coef[None]
-        v_out -= ti.math.sign(v_out) *damping*dt
-        if i < bound:
-            v_out[0] = 0
-            v_out[1] = 0
-        if i > n_grid - bound:
-            v_out[0] = 0
-            v_out[1] = 0
-        if j < bound and v_out[1] < 0:
-            v_out[1] = 0
-        if j > n_grid - bound and v_out[1] > 0:
-            v_out[1] = 0
-        grid_v_out[i, j] = v_out
+    for i, j in ti.ndrange(x_n_grid, y_n_grid):
+        if grid_v_zeroing[i, j]:
+            inv_m = 1 / (grid_m_in[i, j] + 1e-10)
+            v_out = inv_m * grid_v_in[i, j]
+            v_out[1] -= dt * gravity
+            damping = ti.pow(v_out,2)*quad_damping_coef[None]
+            v_out -= ti.math.sign(v_out) *damping*dt
+            if i < bound and v_out[0] < 0.0:
+                v_out[0] = 0
+                # v_out[1] = 0
+            if i > x_n_grid - bound and v_out[0] > 0.0:
+                v_out[0] = 0
+                # v_out[1] = 0
+            if j < bound and v_out[1] < 0:
+                v_out[1] = 0
+            if j > y_n_grid - bound and v_out[1] > 0.0:
+                v_out[1] = 0
+            grid_v_out[i, j] = v_out
+        else:
+            grid_v_out[i,j] =[0.0, 0.0]
 
 
 @ti.kernel
@@ -201,7 +218,7 @@ def g2p(f: ti.i32):
                 g_v = grid_v_out[base[0] + i, base[1] + j]
                 weight = w[i][0] * w[j][1]
                 new_v += weight * g_v
-                new_C += 4 * weight * g_v.outer_product(dpos) * inv_dx
+                new_C += 4 * weight * g_v.outer_product(dpos) @ inv_dx_mat
         new_x[p] = x[p] + dt * new_v
         C[p]=new_C
         v[p]=new_v
@@ -248,10 +265,10 @@ def substep(s):
 
 
 
-x_width_base = (width-4/n_grid)/(N-1)
+x_width_base = (width-4/x_n_grid)/(N-1)
 x_height_base = height/(Nh-1)
 
-x_safety = 2/n_grid
+x_safety = 2/x_n_grid
 
 inner_grid_n = inner_grid_res*inner_grid_res
 y_safety=0

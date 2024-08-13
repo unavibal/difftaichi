@@ -169,7 +169,7 @@ def fill_bottom_image(img: ti.types.ndarray()):
 def main():
     allocate_fields()
     # initialization
-    bot_img = (cv2.imread('squirrel.jpg') / 255.0).astype(np.float32)
+    bot_img = (cv2.imread('examples/squirrel.jpg') / 255.0).astype(np.float32)
     fill_bottom_image(bot_img)
 
     initial[n_grid // 2, n_grid // 2] = 1

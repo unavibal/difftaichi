@@ -7,4 +7,6 @@ __pycache__
 .conda/
 
 *.bin
-diffmpm/
+diffmpm
+wave
+water_renderer

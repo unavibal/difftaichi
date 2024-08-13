@@ -131,7 +131,7 @@ def main():
     options = parser.parse_args()
 
     # initialization
-    target_img = cv2.imread('taichi.png')[:, :, 0] / 255.0
+    target_img = cv2.imread('examples/taichi.png')[:, :, 0] / 255.0
     target_img -= target_img.mean()
     target_img = cv2.resize(target_img, (n_grid, n_grid))
     cv2.imshow('target', target_img * amplify + 0.5)

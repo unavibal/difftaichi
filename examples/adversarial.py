@@ -30,7 +30,7 @@ def imshow(inp, title=None):
         plt.title(title)
 
 
-with open('imagenet.json') as f:
+with open('examples/imagenet.json') as f:
     imagenet_labels = json.load(f)
 
 # In[model]:
