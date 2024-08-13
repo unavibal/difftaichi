@@ -18,7 +18,7 @@ ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16)
 dx = 1/120
 
 #integer multiplicator for canvas size canvax_?*dx is canvas size for physics
-x_n_grid = 180
+x_n_grid = 280
 y_n_grid = 120
 
 #Physical Size
@@ -40,7 +40,7 @@ height = 3
 x_start = 10
 y_start = 58
 
-N = 480  # reduce to 30 if run out of GPU memory
+N = 800  # reduce to 30 if run out of GPU memory
 Nh = 10
 
 
@@ -130,9 +130,14 @@ grid_m_in = ti.field(dtype=real,
                      shape=(x_n_grid, y_n_grid),
                      needs_grad=grad_needed)
 
-grid_v_zeroing = ti.field(dtype=ti.u1,
+grid_v_override = ti.field(dtype=ti.u1,
                           shape=(x_n_grid, y_n_grid))
-grid_v_zeroing.fill(1)
+grid_v_override.fill(0)
+
+grid_v_ovalue = ti.Vector.field(dim,
+                    dtype=real,
+                    shape=(x_n_grid, y_n_grid),
+                    needs_grad=grad_needed)
 
 
 C = ti.Matrix.field(dim,
@@ -193,18 +198,36 @@ def p2g(f: ti.i32):
                                                          affine @ dpos)
                 grid_m_in[base + offset] += weight * p_mass
                 if p < Nh:
-                    grid_v_zeroing[base + offset] = 0
+                    grid_v_override[base + offset] = 1
+                    grid_v_ovalue[base+offset] = 0
 
 
 bound = 3
 quad_damping_coef = ti.field(real, shape=(), needs_grad= grad_needed)
 quad_damping_coef[None] = 8.0
-quad_damping_coef[None] = 5.32
+quad_damping_coef[None] = 0 #5.32
+
+@ti.kernel
+def manipulate_grid(s: ti.i32):
+    # Move the end points
+    for p in range(n_particles-Nh, n_particles):
+        speed = 0.0
+        base = ti.cast(x[p] * inv_dx - 0.5, ti.i32)
+        if base[0] < 200:
+            speed = 10.0
+
+        for i in ti.static(range(3)):
+            for j in ti.static(range(3)):
+                offset = ti.Vector([i, j])
+                grid_v_override[base + offset] = 1
+                grid_v_ovalue[base+offset] = [speed, 0]
 
 @ti.kernel
 def grid_op(f: ti.i32):
     for i, j in ti.ndrange(x_n_grid, y_n_grid):
-        if grid_v_zeroing[i, j]:
+        if grid_v_override[i, j]:
+            grid_v_out[i,j] = grid_v_ovalue[i, j]
+        else:
             inv_m = 1 / (grid_m_in[i, j] + 1e-10)
             v_out = inv_m * grid_v_in[i, j]
             v_out[1] -= dt * gravity
@@ -221,8 +244,7 @@ def grid_op(f: ti.i32):
             if j > y_n_grid - bound and v_out[1] > 0.0:
                 v_out[1] = 0
             grid_v_out[i, j] = v_out
-        else:
-            grid_v_out[i,j] =[0.0, 0.0]
+            
 
 
 @ti.kernel
@@ -282,11 +304,18 @@ def compute_loss():
     dist = (x_avg[None] - ti.Vector(target))**2
     loss[None] = 0.5 * (dist[0] + dist[1])
 
+@ti.kernel
+def manipulation_reset():
+    grid_v_override.fill(0)
+    grid_v_ovalue.fill(0)
+
 
 def substep(s):
     p2g(s)
+    manipulate_grid(s)
     grid_op(s)
     g2p(s)
+    manipulation_reset()
     if s > 0.8*steps:
         update_loss()
 
