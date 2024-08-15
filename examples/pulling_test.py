@@ -1,3 +1,4 @@
+from doctest import debug
 from math import isnan
 from turtle import update
 import taichi as ti
@@ -12,7 +13,7 @@ os.environ["KERAS_BACKEND"] = "tensorflow"
 
 grad_needed = True
 real = ti.f32
-ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16)
+ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16, debug=False)
 
 #How big is a base unit dx?
 dx = 1/120
@@ -132,6 +133,10 @@ grid_m_in = ti.field(dtype=real,
 
 grid_v_override = ti.field(dtype=ti.u1,
                           shape=(x_n_grid, y_n_grid))
+
+do_grid_op = ti.field(dtype=ti.u1,
+                   shape=(x_n_grid, y_n_grid))
+
 grid_v_override.fill(0)
 
 grid_v_ovalue = ti.Vector.field(dim,
@@ -197,6 +202,7 @@ def p2g(f: ti.i32):
                 grid_v_in[base + offset] += weight * (p_mass * v[p] +
                                                          affine @ dpos)
                 grid_m_in[base + offset] += weight * p_mass
+                do_grid_op[base+offset] = 1
                 if p < Nh:
                     grid_v_override[base + offset] = 1
                     grid_v_ovalue[base+offset] = 0
@@ -205,7 +211,7 @@ def p2g(f: ti.i32):
 bound = 3
 quad_damping_coef = ti.field(real, shape=(), needs_grad= grad_needed)
 quad_damping_coef[None] = 8.0
-quad_damping_coef[None] = 0 #5.32
+quad_damping_coef[None] = 500.0
 
 @ti.kernel
 def manipulate_grid(s: ti.i32):
@@ -227,12 +233,16 @@ def grid_op(f: ti.i32):
     for i, j in ti.ndrange(x_n_grid, y_n_grid):
         if grid_v_override[i, j]:
             grid_v_out[i,j] = grid_v_ovalue[i, j]
-        else:
+        elif do_grid_op[i,j]:
             inv_m = 1 / (grid_m_in[i, j] + 1e-10)
+            # print(inv_m)
             v_out = inv_m * grid_v_in[i, j]
             v_out[1] -= dt * gravity
-            damping = ti.pow(v_out,2)*quad_damping_coef[None]
-            v_out -= ti.math.sign(v_out) *damping*dt
+            damping = ti.pow(v_out,2)*quad_damping_coef[None]*inv_m*ti.math.sign(v_out)*dt
+            if ti.Vector.norm(damping) >= ti.Vector.norm(v_out):
+                v_out = 0
+            else:
+                v_out-=damping 
             if i < bound and v_out[0] < 0.0:
                 v_out[0] = 0
                 # v_out[1] = 0
@@ -308,6 +318,7 @@ def compute_loss():
 def manipulation_reset():
     grid_v_override.fill(0)
     grid_v_ovalue.fill(0)
+    do_grid_op.fill(0)
 
 
 def substep(s):
