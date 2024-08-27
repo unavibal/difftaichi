@@ -145,18 +145,15 @@ def p2g(f: ti.i32):
         r, s = ti.polar_decompose(new_F[p])
         piola = 2* mu[None] * (new_F[p]-inv_F.transpose()) + la[None] * ti.math.log(J)*inv_F.transpose()
 
-        ftf_inv = ti.math.inverse (new_F[p].transpose() @ new_F[p])
-        pio_energy = ti.Matrix.diag(2,mu[None])- mu[None] *ftf_inv.transpose() + la[None]*ti.math.log(J)*ftf_inv.transpose()
-        piola_alt = pio_energy@(new_F[p] + new_F[p].transpose())
+        dtF = C[p] @ F[p]*dt
+        diss_piola = 2* mu[None]/1000 * (dtF-ti.Matrix.inverse(dtF).transpose()) + la[None]/1000 * ti.math.log(J)*ti.Matrix.inverse(dtF).transpose()
 
-        pio_diff = piola-piola_alt
+            # cauchy = 2 * mu[None] * (new_F[p] - r) @ new_F[p].transpose() + \
+            #          ti.Matrix.diag(2, la[None] * (J - 1) * J)
+        cauchy = piola @ new_F[p].transpose()/J
+        diss_cauchy = diss_piola@ new_F[p].transpose()/J
 
-        print('yoyoy')
-        # cauchy = 2 * mu[None] * (new_F[p] - r) @ new_F[p].transpose() + \
-        #          ti.Matrix.diag(2, la[None] * (J - 1) * J)
-        cauchy = piola @ new_F[p].transpose()
-
-        stress = -(dt * p_vol * 4 * inv_dx * inv_dx) * cauchy
+        stress = -(dt * p_vol * 4 * inv_dx * inv_dx) * (cauchy-diss_cauchy)
         affine = stress + p_mass * C[p]
 
         for i in ti.static(range(3)):
