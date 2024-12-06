@@ -1,3 +1,4 @@
+from doctest import debug
 from math import isnan
 from turtle import update
 import taichi as ti
@@ -6,25 +7,53 @@ import numpy as np
 import tensorflow as tf
 import keras.api.optimizers as opt
 import os
-import datetime
 
 
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 grad_needed = True
 real = ti.f32
-ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16)
+ti.init(arch=ti.cuda, default_fp=real, device_memory_GB=16, debug=False)
 
-dim = 2
-width = 1.0
-height = 0.025
-N = 480  # reduce to 30 if run out of GPU memory
+#How big is a base unit dx?
+dx = 1/120
+
+#integer multiplicator for canvas size canvax_?*dx is canvas size for physics
+x_n_grid = 280
+y_n_grid = 120
+
+#Physical Size
+phys_dim_x = x_n_grid*dx
+phys_dim_y = y_n_grid*dx
+
+render_scale = ti.Vector([phys_dim_x, phys_dim_y])
+
+#Resolution setting. 1 dx to dx_base_res
+dx_base_res_y = 640*dx
+dx_base_res_x = 640*dx
+
+res_x = int(dx_base_res_x * x_n_grid)
+res_y = int(dx_base_res_y * y_n_grid) 
+
+width = 120
+height = 3
+lowest_point = 0.48
+
+x_start = 10
+y_start = 58
+
+N = 150  # reduce to 30 if run out of GPU memory
 Nh = 10
+
+
+
 n_particles = N * Nh
-n_grid = 120
+
 inner_grid_res = 10
 
-dx = 1 / n_grid
+# n_grid = x_n_grid*y_n_grid
+dim = 2
+
 inv_dx = 1 / dx
 dt = 0.5e-4
 p_mass = 10
@@ -47,13 +76,13 @@ mu[None], la[None] = E[None] / (2.0 * (1.0 + nu[None])), E[None] * nu[None] / ((
 mu[None] = 963.0
 la[None] = 10070
 
-max_steps = 40024
-steps = 40024
+max_steps = 440024
+steps = 440024
 gravity = 9.8
 target_area = 0.05
 lower_bound = int(np.floor(n_particles*(0.5-target_area/2)))
 upper_bound = int(np.ceil(n_particles*(0.5+target_area/2)))
-target = [0.5, 0.3]
+target = [0.5, 0.4]
 
 scalar = lambda: ti.field(dtype=real)
 vec = lambda: ti.Vector.field(dim, dtype=real)
@@ -66,6 +95,12 @@ x = ti.Vector.field(dim,
                     dtype=real,
                     shape=(n_particles),
                     needs_grad=grad_needed)
+
+x_render = ti.Vector.field(dim,
+                    dtype=real,
+                    shape=(n_particles),
+                    needs_grad=grad_needed)
+
 new_x = ti.Vector.field(dim,
                     dtype=real,
                     shape=(n_particles),
@@ -84,18 +119,31 @@ new_v = ti.Vector.field(dim,
 
 grid_v_in = ti.Vector.field(dim,
                             dtype=real,
-                            shape=(n_grid, n_grid),
+                            shape=(x_n_grid, y_n_grid),
                             needs_grad=grad_needed)
 
 
 grid_v_out = ti.Vector.field(dim,
                              dtype=real,
-                             shape=(n_grid, n_grid),
+                             shape=(x_n_grid, y_n_grid),
                              needs_grad=grad_needed)
 
 grid_m_in = ti.field(dtype=real,
-                     shape=(n_grid, n_grid),
+                     shape=(x_n_grid, y_n_grid),
                      needs_grad=grad_needed)
+
+grid_v_override = ti.field(dtype=ti.u1,
+                          shape=(x_n_grid, y_n_grid))
+
+do_grid_op = ti.field(dtype=ti.u1,
+                   shape=(x_n_grid, y_n_grid))
+
+grid_v_override.fill(0)
+
+grid_v_ovalue = ti.Vector.field(dim,
+                    dtype=real,
+                    shape=(x_n_grid, y_n_grid),
+                    needs_grad=grad_needed)
 
 
 C = ti.Matrix.field(dim,
@@ -155,32 +203,64 @@ def p2g(f: ti.i32):
                 grid_v_in[base + offset] += weight * (p_mass * v[p] +
                                                          affine @ dpos)
                 grid_m_in[base + offset] += weight * p_mass
+                do_grid_op[base+offset] = 1
+                if p < Nh:
+                    grid_v_override[base + offset] = 1
+                    grid_v_ovalue[base+offset] = 0
 
 
 bound = 3
 quad_damping_coef = ti.field(real, shape=(), needs_grad= grad_needed)
 quad_damping_coef[None] = 8.0
-quad_damping_coef[None] = 5.32
+quad_damping_coef[None] = 00.0
+
+@ti.kernel
+def manipulate_grid(s: ti.i32):
+    # Move the end points
+    min_y = x[0][1]
+    for p in range(1,n_particles):
+        if x[p][1] < min_y:
+            min_y = x[p][1]
+    for p in range(n_particles-Nh, n_particles):
+        speed = 0.0
+        base = ti.cast(x[p] * inv_dx - 0.5, ti.i32)
+        
+        if base[0] < 200 and min_y < lowest_point and s > 0.1*steps:
+            speed = 0.1
+
+        for i in ti.static(range(3)):
+            for j in ti.static(range(3)):
+                offset = ti.Vector([i, j])
+                grid_v_override[base + offset] = 1
+                grid_v_ovalue[base+offset] = [speed, 0]
 
 @ti.kernel
 def grid_op(f: ti.i32):
-    for i, j in ti.ndrange(n_grid, n_grid):
-        inv_m = 1 / (grid_m_in[i, j] + 1e-10)
-        v_out = inv_m * grid_v_in[i, j]
-        v_out[1] -= dt * gravity
-        damping = ti.pow(v_out,2)*quad_damping_coef[None]
-        v_out -= ti.math.sign(v_out) *damping*dt
-        if i < bound:
-            v_out[0] = 0
-            v_out[1] = 0
-        if i > n_grid - bound:
-            v_out[0] = 0
-            v_out[1] = 0
-        if j < bound and v_out[1] < 0:
-            v_out[1] = 0
-        if j > n_grid - bound and v_out[1] > 0:
-            v_out[1] = 0
-        grid_v_out[i, j] = v_out
+    for i, j in ti.ndrange(x_n_grid, y_n_grid):
+        if grid_v_override[i, j]:
+            grid_v_out[i,j] = grid_v_ovalue[i, j]
+        elif do_grid_op[i,j]:
+            inv_m = 1 / (grid_m_in[i, j] + 1e-10)
+            # print(inv_m)
+            v_out = inv_m * grid_v_in[i, j]
+            v_out[1] -= dt * gravity
+            damping = ti.pow(v_out,2)*quad_damping_coef[None]*inv_m*ti.math.sign(v_out)*dt
+            if ti.Vector.norm(damping) >= ti.Vector.norm(v_out):
+                v_out = 0
+            else:
+                v_out-=damping 
+            if i < bound and v_out[0] < 0.0:
+                v_out[0] = 0
+                # v_out[1] = 0
+            if i > x_n_grid - bound and v_out[0] > 0.0:
+                v_out[0] = 0
+                # v_out[1] = 0
+            if j < bound and v_out[1] < 0:
+                v_out[1] = 0
+            if j > y_n_grid - bound and v_out[1] > 0.0:
+                v_out[1] = 0
+            grid_v_out[i, j] = v_out
+            
 
 
 @ti.kernel
@@ -209,6 +289,7 @@ def g2p(f: ti.i32):
     
     for p in range(n_particles):
         x[p]=new_x[p]
+        x_render[p]=new_x[p]/render_scale
 
 
 
@@ -239,28 +320,37 @@ def compute_loss():
     dist = (x_avg[None] - ti.Vector(target))**2
     loss[None] = 0.5 * (dist[0] + dist[1])
 
+@ti.kernel
+def manipulation_reset():
+    grid_v_override.fill(0)
+    grid_v_ovalue.fill(0)
+    do_grid_op.fill(0)
+
 
 def substep(s):
     p2g(s)
+    manipulate_grid(s)
     grid_op(s)
     g2p(s)
+    manipulation_reset()
     if s > 0.8*steps:
         update_loss()
 
 
-
-x_width_base = (width-4/n_grid)/(N-1)
-x_height_base = height/(Nh-1)
-
-x_safety = 2/n_grid
+x_safety = 2/x_n_grid
 
 inner_grid_n = inner_grid_res*inner_grid_res
 y_safety=0
 og_dx = (width-2*x_safety)/N
 og_dy = (height-2*y_safety)/Nh
 
-x_linspace = np.linspace(x_safety+og_dx/2, width-x_safety-og_dx/2, N)
-y_linspace = np.linspace(y_safety+og_dy/2, height-y_safety-og_dy/2, Nh)
+og_dx = width*dx/N
+og_dy = height*dx/Nh
+x_start_abs = dx*x_start
+y_start_abs = dx*y_start
+
+x_linspace = np.linspace(x_start_abs+og_dx/2, x_start_abs+width*dx-og_dx/2, N)
+y_linspace = np.linspace(y_start_abs+og_dy/2, y_start_abs+height*dx-og_dy/2, Nh)
 
 x_inner_linspace = np.linspace(-og_dx/2, og_dx/2, inner_grid_res)
 y_inner_linspace = np.linspace(-og_dy/2, og_dy/2, inner_grid_res)
@@ -277,8 +367,8 @@ in_yy = np.reshape(in_yy, [-1,1]).squeeze(axis=1)
 losses = []
 img_count = 0
 
-gui = ti.GUI("Simple Differentiable MPM Solver", (640, 640), 0xAAAAAA)
-ui = ti.ui.Window("Simple Differentiable MPM Solver", (640, 640), fps_limit=1000)
+# gui = ti.GUI("Simple Differentiable MPM Solver", (640, 640), 0xAAAAAA)
+ui = ti.ui.Window("Simple Differentiable MPM Solver", (res_x, res_y), fps_limit=1000)
 canvas = ui.get_canvas()
 canvas.set_background_color((0.0,0.0,0.0))
 
@@ -303,9 +393,9 @@ mu_opt = tf.Variable([mu[None]])
 la_opt = tf.Variable([la[None]])
 damp_coef = tf.Variable([quad_damping_coef[None]])
 
-mu_lr =  2.0*1e2
-la_lr =   1.30*1e2
-damp_lr = 0*1e-1
+mu_lr =  3.0*1e1
+la_lr =   2.5*1e1
+damp_lr = 2*1e-1
 
 mu_min = 1.0
 la_min = 100.0
@@ -327,114 +417,37 @@ damp_adam.apply_gradients(zip([zero_grad], [damp_coef]))
 
 print("mu=", mu[None], "la=", la[None])
 
-video_it = 3
 
-for optim_i in range(12):
-    if  optim_i % video_it==0:
-        curstamp = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d-%H:%M:%S')
-        directory = 'video_'+curstamp
-        if not os.path.exists(directory):
-            os.makedirs(directory)
+init_v[None] = [0.0, 0.0]
 
-    init_v[None] = [0.0, 0.0]
+for i in range(n_particles):
+    F[i] = [[1, 0], [0, 1]]
 
-    for i in range(n_particles):
-        F[i] = [[1, 0], [0, 1]]
+for i in range(N):
+    for j in range(Nh):
+        grid_choice = np.random.randint(0,inner_grid_n)
+        x[i*Nh+j] = [out_xx[i,j]+in_xx[grid_choice], out_yy[i,j]+in_yy[grid_choice]]
     
-    for i in range(N):
-        for j in range(Nh):
-            # x[i * Nh + j] = [x_width_base*i+2/n_grid, x_height_base*j+0.5]
-            # x[i*Nh+j] = np.random.rand(2)*np.array([width-4/n_grid, height])+np.array([2/n_grid,0.5])
-            grid_choice = np.random.randint(0,inner_grid_n)
-            x[i*Nh+j] = [out_xx[i,j]+in_xx[grid_choice], out_yy[i,j]+in_yy[grid_choice]+0.5]
-        
-    set_v()
+set_v()
 
-    grid_v_in.fill(0)
-    grid_m_in.fill(0)
+grid_v_in.fill(0)
+grid_m_in.fill(0)
 
-    x_avg[None] = [0, 0] 
-    loss[None] = 0.0
-    with ti.ad.Tape(loss=loss):
-        set_v()
-        for s in range(steps - 1):
-            substep(s)
-            if s % n_frame==0 and optim_i % video_it==0:
-                # x_np =x.to_numpy()
-                # gui.circles(x_np[0:lower_bound, :], color=0x112233, radius=1.5)
-                # gui.circles(x_np[upper_bound:-1, :], color=0x112233, radius=1.5)
-                # gui.circles(x_np[lower_bound:upper_bound, :], color=0xFF0070, radius=1.5)
-                # gui.circle(target, radius=5, color=0xFFFFFF)
-                # img_count += 1
-                # gui.show()
-                canvas.set_background_color((0.7,0.7,0.7))
-                canvas.circles(x, color=(0.3, 0.3, 0.3), radius=0.0015)
-                # gui.circles(x_np[upper_bound:-1, :], color=0x112233, radius=1.5)
-                # gui.circles(x_np[lower_bound:upper_bound, :], color=0xFF0070, radius=1.5)
-                canvas.circles(ti_target, radius=0.005, color=(1, 1, 1))
-                img_count += 1
-                ui.save_image(directory+'/frame_'+str(s).zfill(5)+'.png')
-                ui.show()
+for s in range(steps - 1):
+    substep(s)
+    if s % n_frame==0:
+        # x_np =x.to_numpy()
+        # gui.circles(x_np[0:lower_bound, :], color=0x112233, radius=1.5)
+        # gui.circles(x_np[upper_bound:-1, :], color=0x112233, radius=1.5)
+        # gui.circles(x_np[lower_bound:upper_bound, :], color=0xFF0070, radius=1.5)
+        # gui.circle(target, radius=5, color=0xFFFFFF)
+        # img_count += 1
+        # gui.show()
+        canvas.set_background_color((0.7,0.7,0.7))
+        canvas.circles(x_render, color=(0.3, 0.3, 0.3), radius=0.0015)
+        # gui.circles(x_np[upper_bound:-1, :], color=0x112233, radius=1.5)
+        # gui.circles(x_np[lower_bound:upper_bound, :], color=0xFF0070, radius=1.5)
+        canvas.circles(ti_target, radius=0.005, color=(1, 1, 1))
+        img_count += 1
+        ui.show()
 
-        # comput_x_avg_relevant()
-        # compute_loss()
-
-    l = loss[None]
-    losses.append(l)
-
-    mu_grad = mu.grad[None]
-    la_grad = la.grad[None]
-    damp_grad = quad_damping_coef.grad[None]
-
-    print('loss=', l, '   grad=', (mu_grad, la_grad, damp_grad))
-
-    if tf.norm(mu_grad) > mu_clip:
-        mu_grad = np.sign(mu_grad)*mu_clip
-    elif isnan(mu_grad):
-        mu_grad = 0
-
-    if tf.norm(la_grad) > la_clip:
-        la_grad = np.sign(la_grad)*la_clip
-    elif isnan(la_grad):
-        la_grad = 0
-
-    if tf.norm(damp_grad) > damp_clip:
-        damp_grad = np.sign(damp_grad)* damp_clip
-    elif isnan(damp_grad):
-        damp_grad = 0
-
-    mu_adam.apply([tf.constant([mu_grad])])
-    la_adam.apply([tf.constant([la_grad])])
-    damp_adam.apply([tf.constant([damp_grad])])
-
-    mu[None] = mu_opt.numpy()[0]
-    la[None] = la_opt.numpy()[0]
-
-    if mu_opt.numpy()[0] > mu_min:
-        mu[None] = mu_opt.numpy()[0]
-    else: 
-        mu_opt.assign([mu_min])
-        mu_adam.set_weights([tf.constant(0.0), tf.constant(mu_lr), tf.constant([0.0]), tf.constant([0.0])])
-        mu[None] = mu_min
-
-    if la_opt.numpy()[0] > la_min:
-        la[None] = la_opt.numpy()[0]
-    else: 
-        la_opt.assign([la_min])
-        la_adam.set_weights([tf.constant(0.0), tf.constant(la_lr), tf.constant([0.0]), tf.constant([0.0])])
-        la[None] = la_min
-
-    if damp_coef.numpy()[0] > damp_min:
-        quad_damping_coef[None] = damp_coef.numpy()[0]
-    else: 
-        damp_coef.assign([damp_min])
-        damp_adam.set_weights([tf.constant(0.0), tf.constant(damp_lr), tf.constant([0.0]), tf.constant([0.0])])
-        quad_damping_coef[None] = damp_min
-
-    print("mu=", mu[None], "la=", la[None], "damp_coef=", quad_damping_coef[None])
-
-plt.title("Optimization of Initial Velocity")
-plt.ylabel("Loss")
-plt.xlabel("Gradient Descent Iterations")
-plt.plot(losses)
-plt.show()
